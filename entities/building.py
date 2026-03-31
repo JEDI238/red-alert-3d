@@ -1,6 +1,11 @@
+import sys
+from pathlib import Path
 from math import atan2, degrees
 
-from ursina import Entity, Vec3, color, destroy, lerp, time
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from ursina import Cone, Cylinder, Entity, Vec3, color, destroy, lerp, time
 from factions import get_faction_theme
 
 
@@ -9,6 +14,7 @@ class Building(Entity):
     cost = 0
     base_tint = color.rgb32(96, 103, 112)
     size = (2, 2, 2)
+    visual_rotation_y = 38
     placement_y = 1
     default_health = 500
     selection_color = color.rgb32(255, 201, 102)
@@ -39,6 +45,7 @@ class Building(Entity):
         self.max_health = health if health is not None else self.default_health
         self.health = self.max_health
         self.visual_parts = []
+        self.visual_root = Entity(parent=self, rotation_y=self.visual_rotation_y, collider=None)
         self.selection_indicator = Entity(
             parent=self,
             model="plane",
@@ -130,7 +137,7 @@ class Building(Entity):
 
     def _add_detail(self, *, scale, position=(0, 0, 0), color=None, rotation=(0, 0, 0), model="cube"):
         detail = Entity(
-            parent=self,
+            parent=self.visual_root,
             model=model,
             scale=scale,
             position=position,
@@ -140,6 +147,147 @@ class Building(Entity):
         )
         self.visual_parts.append(detail)
         return detail
+
+    def _add_pipe(self, *, position=(0, 0, 0), length=0.6, radius=0.06, axis="x", color=None, resolution=14):
+        if axis == "x":
+            rotation = (0, 0, 90)
+        elif axis == "z":
+            rotation = (90, 0, 0)
+        else:
+            rotation = (0, 0, 0)
+        return self._add_detail(
+            scale=(radius * 2, length, radius * 2),
+            position=position,
+            color=color,
+            rotation=rotation,
+            model=Cylinder(resolution, start=-0.5),
+        )
+
+    def _add_light_beacon(
+        self,
+        *,
+        position=(0, 0, 0),
+        radius=0.08,
+        base_height=0.07,
+        stem_height=0.06,
+        base_color=None,
+        glow_color=None,
+    ):
+        x, y, z = position
+        base_color = base_color if base_color is not None else self.style["metal"]
+        glow_color = glow_color if glow_color is not None else self.style["glow"]
+        self._add_detail(
+            scale=(radius * 1.6, base_height, radius * 1.6),
+            position=(x, y - stem_height - (base_height / 2), z),
+            color=base_color,
+            model=Cylinder(14, start=-0.5),
+        )
+        self._add_detail(
+            scale=(radius * 0.9, stem_height, radius * 0.9),
+            position=(x, y - (stem_height / 2), z),
+            color=base_color,
+            model=Cylinder(12, start=-0.5),
+        )
+        self._add_detail(scale=(radius * 1.12, radius * 1.12, radius * 1.12), position=position, color=glow_color, model="sphere")
+
+    def _add_corner_posts(
+        self,
+        *,
+        footprint=(1.0, 1.0),
+        y=0.0,
+        height=0.4,
+        thickness=0.08,
+        inset=0.0,
+        color=None,
+        cap_color=None,
+    ):
+        half_x = max(0.0, (footprint[0] / 2) - inset)
+        half_z = max(0.0, (footprint[1] / 2) - inset)
+        cap_height = max(0.04, thickness * 0.55)
+        for post_x in (-half_x, half_x):
+            for post_z in (-half_z, half_z):
+                self._add_detail(scale=(thickness, height, thickness), position=(post_x, y, post_z), color=color)
+                if cap_color is not None:
+                    self._add_detail(
+                        scale=(thickness * 1.3, cap_height, thickness * 1.3),
+                        position=(post_x, y + (height / 2) + (cap_height / 2), post_z),
+                        color=cap_color,
+                    )
+
+    def _add_perimeter_trim(self, *, footprint=(1.0, 1.0), y=0.0, thickness=0.06, edge=0.08, inset=0.0, color=None):
+        width = max(0.12, footprint[0] - (inset * 2))
+        depth = max(0.12, footprint[1] - (inset * 2))
+        strip_z = max(0.0, (depth / 2) - (edge / 2))
+        strip_x = max(0.0, (width / 2) - (edge / 2))
+        self._add_detail(scale=(width, thickness, edge), position=(0, y, strip_z), color=color)
+        self._add_detail(scale=(width, thickness, edge), position=(0, y, -strip_z), color=color)
+        self._add_detail(scale=(edge, thickness, depth), position=(strip_x, y, 0), color=color)
+        self._add_detail(scale=(edge, thickness, depth), position=(-strip_x, y, 0), color=color)
+
+    def _add_vent_bank(
+        self,
+        *,
+        position=(0, 0, 0),
+        count=3,
+        spacing=0.16,
+        size=(0.1, 0.16, 0.18),
+        axis="x",
+        color=None,
+        cap_color=None,
+    ):
+        x, y, z = position
+        origin = -((count - 1) * spacing) / 2
+        for index in range(count):
+            offset = origin + (index * spacing)
+            vent_x = x + offset if axis == "x" else x
+            vent_z = z + offset if axis == "z" else z
+            self._add_detail(scale=size, position=(vent_x, y, vent_z), color=color)
+            if cap_color is not None:
+                self._add_detail(
+                    scale=(size[0] * 1.08, max(0.04, size[1] * 0.22), size[2] * 1.08),
+                    position=(vent_x, y + (size[1] / 2) + max(0.025, size[1] * 0.12), vent_z),
+                    color=cap_color,
+                )
+
+    def _add_stack_tower(
+        self,
+        *,
+        position=(0, 0, 0),
+        height=0.9,
+        radius=0.18,
+        segments=4,
+        taper=0.86,
+        color=None,
+        cap_color=None,
+        emitter=False,
+    ):
+        x, y, z = position
+        segment_height = height / max(1, segments)
+        segment_y = y - (height / 2) + (segment_height / 2)
+        current_radius = radius
+        for _ in range(segments):
+            self._add_detail(
+                scale=(current_radius * 2, segment_height, current_radius * 2),
+                position=(x, segment_y, z),
+                color=color,
+                model=Cylinder(16, start=-0.5),
+            )
+            segment_y += segment_height
+            current_radius *= taper
+        if cap_color is not None:
+            self._add_detail(
+                scale=(max(radius * 1.4, current_radius * 2.4), max(0.05, segment_height * 0.25), max(radius * 1.4, current_radius * 2.4)),
+                position=(x, y + (height / 2) + max(0.03, segment_height * 0.18), z),
+                color=cap_color,
+                model=Cylinder(16, start=-0.5),
+            )
+        if emitter:
+            self._add_detail(
+                scale=(max(radius * 0.65, 0.1), max(segment_height * 0.6, 0.12), max(radius * 0.65, 0.1)),
+                position=(x, y + (height / 2) + max(0.12, segment_height * 0.4), z),
+                color=self.style["glow"],
+                model=Cone(16, radius=0.5, height=1),
+            )
 
     def _build_visuals(self):
         pass
@@ -317,6 +465,17 @@ class MainBase(Building):
 
     def _build_visuals(self):
         self._add_detail(scale=(1.12, 0.04, 1.12), position=(0, -0.52, 0), color=self.style["metal"])
+        self._add_perimeter_trim(footprint=(1.18, 1.18), y=-0.34, thickness=0.05, edge=0.08, color=self.style["panel"])
+        self._add_perimeter_trim(footprint=(1.0, 1.0), y=0.42, thickness=0.04, edge=0.06, color=self.style["metal"])
+        self._add_corner_posts(
+            footprint=(1.0, 1.0),
+            y=0.02,
+            height=0.62,
+            thickness=0.09,
+            inset=0.06,
+            color=self.style["panel"],
+            cap_color=self.style["roof"],
+        )
         self._add_detail(scale=(0.96, 0.18, 0.96), position=(0, 0.58, 0), color=self.style["roof"])
         self._add_detail(scale=(0.44, 0.54, 0.28), position=(0, 0.94, -0.12), color=self.style["metal"])
         self._add_detail(scale=(0.18, 0.62, 0.18), position=(-0.62, 0.72, 0.36), color=self.style["panel"])
@@ -329,7 +488,15 @@ class MainBase(Building):
         self._add_detail(scale=(0.14, 0.3, 0.14), position=(0.9, -0.18, 0.7), color=self.style["metal"])
         self._add_detail(scale=(0.56, 0.06, 0.1), position=(0, 0.82, 0.44), color=self.style["accent"])
         self._add_detail(scale=(0.72, 0.05, 0.08), position=(0, 1.04, -0.72), color=self.style["panel"])
+        self._add_vent_bank(position=(0, 0.76, 0.18), count=4, spacing=0.18, size=(0.1, 0.14, 0.2), color=self.style["panel"], cap_color=self.style["roof"])
+        self._add_pipe(position=(-0.96, -0.16, -0.1), length=0.92, radius=0.05, axis="z", color=self.style["metal"])
+        self._add_pipe(position=(0.96, -0.16, -0.1), length=0.92, radius=0.05, axis="z", color=self.style["metal"])
+        self._add_pipe(position=(0, 0.92, -0.46), length=0.62, radius=0.04, axis="x", color=self.style["metal"])
+        self._add_light_beacon(position=(-0.9, 0.08, 0.86), radius=0.07, glow_color=self.style["accent"])
+        self._add_light_beacon(position=(0.9, 0.08, 0.86), radius=0.07, glow_color=self.style["accent"])
         if self.faction_key == "soviet":
+            self._add_stack_tower(position=(-0.52, 1.16, -0.52), height=0.78, radius=0.11, segments=4, color=self.style["metal"], cap_color=self.style["glow"], emitter=True)
+            self._add_stack_tower(position=(0.52, 1.16, -0.52), height=0.78, radius=0.11, segments=4, color=self.style["metal"], cap_color=self.style["glow"], emitter=True)
             self._add_detail(scale=(0.14, 0.9, 0.14), position=(-0.26, 1.3, -0.52), color=self.style["metal"])
             self._add_detail(scale=(0.14, 0.9, 0.14), position=(0.26, 1.3, -0.52), color=self.style["metal"])
             self._add_detail(scale=(0.24, 0.1, 0.24), position=(-0.26, 1.78, -0.52), color=self.style["glow"])
@@ -377,34 +544,47 @@ class Refinery(Building):
         }
 
     def _build_visuals(self):
-        self._add_detail(scale=(1.1, 0.04, 1.08), position=(0, -0.5, 0), color=self.style["metal"])
-        self._add_detail(scale=(1.06, 0.08, 1.02), position=(0, 0.58, 0), color=self.style["roof"])
-        self._add_detail(scale=(0.76, 0.56, 0.52), position=(0, 0.12, -0.36), color=self.style["body"])
-        self._add_detail(scale=(0.62, 0.16, 0.22), position=(0, 0.08, 0.78), color=self.style["accent"])
-        self._add_detail(scale=(0.86, 0.08, 0.12), position=(0, -0.1, 1.02), color=self.style["glow"])
-        self._add_detail(scale=(0.22, 0.48, 0.22), position=(-0.58, 0.02, 0.42), color=self.style["panel"])
-        self._add_detail(scale=(0.22, 0.48, 0.22), position=(0.58, 0.02, 0.42), color=self.style["panel"])
-        self._add_detail(scale=(0.18, 0.82, 0.18), position=(-0.82, 0.64, -0.54), color=self.style["metal"])
-        self._add_detail(scale=(0.18, 0.82, 0.18), position=(0.82, 0.64, -0.54), color=self.style["metal"])
-        self._add_detail(scale=(0.28, 0.14, 0.28), position=(-0.82, 1.08, -0.54), color=self.style["glow"])
-        self._add_detail(scale=(0.28, 0.14, 0.28), position=(0.82, 1.08, -0.54), color=self.style["glow"])
-        self._add_detail(scale=(0.96, 0.12, 0.22), position=(0, 0.32, 0.16), color=self.style["panel"])
-        self._add_detail(scale=(0.26, 0.24, 0.9), position=(-0.98, -0.28, -0.22), color=self.style["metal"])
-        self._add_detail(scale=(0.26, 0.24, 0.9), position=(0.98, -0.28, -0.22), color=self.style["metal"])
-        self._add_detail(scale=(0.18, 0.18, 0.76), position=(0, 0.36, 0.58), color=self.style["accent"])
-        self._add_detail(scale=(0.12, 0.46, 0.12), position=(-0.26, 0.7, 0.18), color=self.style["metal"])
-        self._add_detail(scale=(0.12, 0.46, 0.12), position=(0.26, 0.7, 0.18), color=self.style["metal"])
-        self._add_detail(scale=(0.4, 0.08, 0.08), position=(0, 0.8, 0.26), color=self.style["panel"])
+        self._add_detail(scale=(1.12, 0.04, 1.1), position=(0, -0.5, 0), color=self.style["metal"])
+        self._add_perimeter_trim(footprint=(1.18, 1.08), y=-0.32, thickness=0.05, edge=0.08, color=self.style["panel"])
+        self._add_corner_posts(
+            footprint=(1.0, 0.98),
+            y=-0.02,
+            height=0.58,
+            thickness=0.08,
+            inset=0.06,
+            color=self.style["panel"],
+            cap_color=self.style["roof"],
+        )
+        self._add_detail(scale=(0.76, 0.44, 0.58), position=(-0.46, 0.02, -0.1), color=self.style["body"])
+        self._add_detail(scale=(0.76, 0.44, 0.58), position=(0.46, 0.02, -0.1), color=self.style["body"])
+        self._add_detail(scale=(0.88, 0.12, 0.82), position=(0, 0.5, -0.06), color=self.style["roof"])
+        self._add_detail(scale=(0.92, 0.12, 0.22), position=(0, -0.04, 0.96), color=self.style["accent"])
+        self._add_detail(scale=(0.98, 0.06, 0.14), position=(0, 0.1, 1.12), color=self.style["glow"])
+        self._add_detail(scale=(0.22, 0.54, 0.22), position=(-0.94, 0.1, -0.26), color=self.style["panel"])
+        self._add_detail(scale=(0.22, 0.54, 0.22), position=(0.94, 0.1, -0.26), color=self.style["panel"])
+        self._add_detail(scale=(0.24, 0.24, 1.04), position=(-1.02, -0.18, 0.0), color=self.style["metal"])
+        self._add_detail(scale=(0.24, 0.24, 1.04), position=(1.02, -0.18, 0.0), color=self.style["metal"])
+        self._add_detail(scale=(0.2, 0.16, 0.72), position=(0, 0.28, 0.48), color=self.style["panel"])
+        self._add_vent_bank(position=(0, 0.7, 0.12), count=4, spacing=0.16, size=(0.1, 0.18, 0.14), color=self.style["metal"], cap_color=self.style["roof"])
+        self._add_pipe(position=(-0.46, 0.36, 0.3), length=0.96, radius=0.05, axis="x", color=self.style["metal"])
+        self._add_pipe(position=(0.46, 0.36, 0.3), length=0.96, radius=0.05, axis="x", color=self.style["metal"])
+        self._add_pipe(position=(0.0, 0.02, -0.84), length=1.28, radius=0.05, axis="x", color=self.style["panel"])
+        self._add_light_beacon(position=(-0.86, 0.34, 0.84), radius=0.065, glow_color=self.style["glow"])
+        self._add_light_beacon(position=(0.86, 0.34, 0.84), radius=0.065, glow_color=self.style["glow"])
         if self.faction_key == "soviet":
-            self._add_detail(scale=(0.34, 0.42, 0.34), position=(0, 0.86, -0.18), color=self.style["accent"])
-            self._add_detail(scale=(0.1, 0.82, 0.1), position=(0.0, 1.12, 0.22), color=self.style["metal"])
-            self._add_detail(scale=(0.5, 0.08, 0.14), position=(0, 0.26, 0.98), color=self.style["glow"])
-            self._add_detail(scale=(0.14, 0.24, 0.54), position=(-0.68, 0.04, -0.84), color=self.style["panel"])
+            self._add_stack_tower(position=(-0.26, 1.04, 0.16), height=0.78, radius=0.1, segments=4, color=self.style["metal"], cap_color=self.style["glow"])
+            self._add_stack_tower(position=(0.26, 1.04, 0.16), height=0.78, radius=0.1, segments=4, color=self.style["metal"], cap_color=self.style["glow"])
+            self._add_detail(scale=(0.34, 0.46, 0.34), position=(0, 0.84, -0.18), color=self.style["accent"])
+            self._add_detail(scale=(0.12, 0.92, 0.12), position=(0.0, 1.18, 0.26), color=self.style["metal"])
+            self._add_detail(scale=(0.52, 0.08, 0.14), position=(0, 0.22, 1.0), color=self.style["glow"])
+            self._add_detail(scale=(0.24, 0.18, 0.56), position=(-0.62, 0.12, -0.84), color=self.style["panel"])
+            self._add_detail(scale=(0.24, 0.18, 0.56), position=(0.62, 0.12, -0.84), color=self.style["panel"])
         else:
-            self._add_detail(scale=(0.42, 0.1, 0.68), position=(0, 0.94, -0.18), color=self.style["accent"])
-            self._add_detail(scale=(0.12, 0.62, 0.12), position=(0.0, 1.0, 0.18), color=self.style["metal"])
-            self._add_detail(scale=(0.46, 0.08, 0.14), position=(0, 0.26, 0.98), color=self.style["glow"])
-            self._add_detail(scale=(0.14, 0.24, 0.54), position=(0.68, 0.04, -0.84), color=self.style["panel"])
+            self._add_detail(scale=(0.46, 0.12, 0.74), position=(0, 0.94, -0.18), color=self.style["accent"])
+            self._add_detail(scale=(0.14, 0.72, 0.14), position=(0.0, 1.04, 0.22), color=self.style["metal"])
+            self._add_detail(scale=(0.48, 0.08, 0.14), position=(0, 0.22, 1.0), color=self.style["glow"])
+            self._add_detail(scale=(0.26, 0.16, 0.62), position=(0.72, 0.1, -0.84), color=self.style["panel"])
+            self._add_detail(scale=(0.18, 0.16, 0.48), position=(-0.72, 0.14, -0.78), color=self.style["panel"])
 
 
 class Barracks(Building):
@@ -436,29 +616,201 @@ class Barracks(Building):
         }
 
     def _build_visuals(self):
-        self._add_detail(scale=(1.08, 0.04, 1.08), position=(0, -0.52, 0), color=self.style["metal"])
-        self._add_detail(scale=(1.08, 0.08, 1.08), position=(0, 0.56, 0), color=self.style["roof"])
-        self._add_detail(scale=(0.3, 0.54, 0.14), position=(0, -0.08, 0.52), color=self.style["metal"])
-        self._add_detail(scale=(0.2, 0.22, 0.06), position=(-0.22, 0.04, 0.56), color=self.style["accent"])
-        self._add_detail(scale=(0.2, 0.22, 0.06), position=(0.22, 0.04, 0.56), color=self.style["accent"])
-        self._add_detail(scale=(0.24, 0.48, 0.34), position=(-0.36, -0.08, -0.12), color=self.style["panel"])
-        self._add_detail(scale=(0.24, 0.48, 0.34), position=(0.36, -0.08, -0.12), color=self.style["panel"])
-        self._add_detail(scale=(0.5, 0.12, 0.14), position=(0, 0.16, -0.56), color=self.style["panel"])
-        self._add_detail(scale=(0.48, 0.04, 0.18), position=(0, 0.46, 0.72), color=self.style["glow"])
-        self._add_detail(scale=(0.16, 0.18, 0.08), position=(-0.46, -0.24, 0.62), color=self.style["metal"])
-        self._add_detail(scale=(0.16, 0.18, 0.08), position=(0.46, -0.24, 0.62), color=self.style["metal"])
+        self._add_detail(scale=(1.08, 0.04, 1.1), position=(0, -0.52, 0), color=self.style["metal"])
+        self._add_perimeter_trim(footprint=(1.1, 1.12), y=-0.34, thickness=0.05, edge=0.08, color=self.style["panel"])
+        self._add_corner_posts(
+            footprint=(0.98, 1.02),
+            y=-0.06,
+            height=0.46,
+            thickness=0.08,
+            inset=0.04,
+            color=self.style["panel"],
+            cap_color=self.style["roof"],
+        )
+        self._add_detail(scale=(0.84, 0.34, 0.82), position=(0, -0.04, 0.02), color=self.style["body"])
+        self._add_detail(scale=(0.9, 0.1, 0.86), position=(0, 0.5, 0.02), color=self.style["roof"])
+        self._add_detail(scale=(0.42, 0.48, 0.18), position=(0, -0.02, 0.76), color=self.style["metal"])
+        self._add_detail(scale=(0.28, 0.24, 0.08), position=(-0.24, 0.06, 0.82), color=self.style["accent"])
+        self._add_detail(scale=(0.28, 0.24, 0.08), position=(0.24, 0.06, 0.82), color=self.style["accent"])
+        self._add_detail(scale=(0.26, 0.44, 0.42), position=(-0.54, -0.06, -0.06), color=self.style["panel"])
+        self._add_detail(scale=(0.26, 0.44, 0.42), position=(0.54, -0.06, -0.06), color=self.style["panel"])
+        self._add_detail(scale=(0.64, 0.14, 0.18), position=(0, 0.14, -0.72), color=self.style["panel"])
+        self._add_detail(scale=(0.62, 0.05, 0.18), position=(0, 0.38, 0.94), color=self.style["glow"])
+        self._add_detail(scale=(0.18, 0.18, 0.08), position=(-0.54, -0.22, 0.84), color=self.style["metal"])
+        self._add_detail(scale=(0.18, 0.18, 0.08), position=(0.54, -0.22, 0.84), color=self.style["metal"])
+        self._add_vent_bank(position=(0, 0.64, -0.02), count=3, spacing=0.2, size=(0.12, 0.14, 0.24), color=self.style["panel"], cap_color=self.style["roof"])
+        self._add_pipe(position=(-0.84, -0.12, 0.0), length=0.82, radius=0.045, axis="z", color=self.style["metal"])
+        self._add_pipe(position=(0.84, -0.12, 0.0), length=0.82, radius=0.045, axis="z", color=self.style["metal"])
+        self._add_light_beacon(position=(-0.7, 0.18, 0.84), radius=0.06, glow_color=self.style["accent"])
+        self._add_light_beacon(position=(0.7, 0.18, 0.84), radius=0.06, glow_color=self.style["accent"])
         if self.faction_key == "soviet":
-            self._add_detail(scale=(0.12, 0.62, 0.12), position=(-0.4, 0.62, -0.28), color=self.style["metal"])
-            self._add_detail(scale=(0.12, 0.62, 0.12), position=(0.4, 0.62, -0.28), color=self.style["metal"])
-            self._add_detail(scale=(0.36, 0.08, 0.12), position=(0, 0.28, 0.58), color=self.style["glow"])
-            self._add_detail(scale=(0.12, 0.44, 0.12), position=(0, 0.84, 0.12), color=self.style["accent"])
-            self._add_detail(scale=(0.14, 0.22, 0.46), position=(0, 0.58, -0.72), color=self.style["panel"])
+            self._add_stack_tower(position=(-0.42, 0.92, -0.42), height=0.56, radius=0.08, segments=3, color=self.style["metal"], cap_color=self.style["glow"])
+            self._add_stack_tower(position=(0.42, 0.92, -0.42), height=0.56, radius=0.08, segments=3, color=self.style["metal"], cap_color=self.style["glow"])
+            self._add_detail(scale=(0.14, 0.74, 0.14), position=(-0.42, 0.74, -0.34), color=self.style["metal"])
+            self._add_detail(scale=(0.14, 0.74, 0.14), position=(0.42, 0.74, -0.34), color=self.style["metal"])
+            self._add_detail(scale=(0.44, 0.08, 0.14), position=(0, 0.24, 0.72), color=self.style["glow"])
+            self._add_detail(scale=(0.14, 0.54, 0.14), position=(0, 0.9, 0.12), color=self.style["accent"])
+            self._add_detail(scale=(0.18, 0.2, 0.62), position=(0, 0.58, -0.84), color=self.style["panel"])
         else:
-            self._add_detail(scale=(0.06, 0.56, 0.06), position=(0.38, 0.62, -0.26), color=self.style["metal"])
-            self._add_detail(scale=(0.18, 0.08, 0.18), position=(0.38, 0.96, -0.26), color=self.style["glow"])
-            self._add_detail(scale=(0.46, 0.08, 0.12), position=(0, 0.32, 0.58), color=self.style["glow"])
-            self._add_detail(scale=(0.26, 0.08, 0.26), position=(-0.46, 0.7, 0), color=self.style["accent"])
-            self._add_detail(scale=(0.14, 0.16, 0.56), position=(-0.62, 0.14, -0.56), color=self.style["panel"])
+            self._add_detail(scale=(0.08, 0.62, 0.08), position=(0.42, 0.7, -0.32), color=self.style["metal"])
+            self._add_detail(scale=(0.2, 0.08, 0.2), position=(0.42, 1.04, -0.32), color=self.style["glow"])
+            self._add_detail(scale=(0.5, 0.08, 0.14), position=(0, 0.28, 0.72), color=self.style["glow"])
+            self._add_detail(scale=(0.3, 0.08, 0.3), position=(-0.5, 0.74, 0.02), color=self.style["accent"])
+            self._add_detail(scale=(0.18, 0.16, 0.62), position=(-0.76, 0.1, -0.64), color=self.style["panel"])
+            self._add_detail(scale=(0.12, 0.16, 0.52), position=(0.76, 0.12, -0.58), color=self.style["panel"])
+
+
+class Radar(Building):
+    display_name = "Radar"
+    cost = 450
+    base_tint = color.rgb32(112, 119, 129)
+    size = (2.7, 2.0, 2.9)
+    placement_y = 1.0
+    default_health = 980
+    selection_ring_scale = 1.1
+
+    def _get_style(self):
+        if self.faction_key == "soviet":
+            return {
+                "body": color.rgb32(126, 72, 66),
+                "roof": color.rgb32(169, 93, 85),
+                "metal": color.rgb32(78, 73, 76),
+                "accent": self.faction.accent,
+                "panel": color.rgb32(96, 48, 43),
+                "glow": self.faction.glow,
+            }
+
+        return {
+            "body": color.rgb32(83, 118, 159),
+            "roof": color.rgb32(154, 184, 212),
+            "metal": color.rgb32(74, 89, 111),
+            "accent": self.faction.accent,
+            "panel": color.rgb32(49, 73, 103),
+            "glow": self.faction.glow,
+        }
+
+    def _build_visuals(self):
+        self._add_detail(scale=(1.12, 0.04, 1.08), position=(0, -0.52, 0), color=self.style["metal"])
+        self._add_perimeter_trim(footprint=(1.14, 1.08), y=-0.34, thickness=0.05, edge=0.08, color=self.style["panel"])
+        self._add_corner_posts(
+            footprint=(1.02, 0.98),
+            y=0.02,
+            height=0.64,
+            thickness=0.08,
+            inset=0.06,
+            color=self.style["panel"],
+            cap_color=self.style["roof"],
+        )
+        self._add_detail(scale=(0.88, 0.36, 0.68), position=(0, 0.04, -0.18), color=self.style["body"])
+        self._add_detail(scale=(0.94, 0.1, 0.74), position=(0, 0.48, -0.12), color=self.style["roof"])
+        self._add_detail(scale=(0.88, 0.08, 0.16), position=(0, -0.04, 0.98), color=self.style["glow"])
+        self._add_detail(scale=(0.24, 0.58, 0.24), position=(-0.78, 0.04, 0.22), color=self.style["panel"])
+        self._add_detail(scale=(0.24, 0.58, 0.24), position=(0.78, 0.04, 0.22), color=self.style["panel"])
+        self._add_detail(scale=(0.22, 0.92, 0.22), position=(0, 0.8, 0.18), color=self.style["metal"])
+        self._add_detail(scale=(0.62, 0.08, 0.18), position=(0, 0.38, 0.66), color=self.style["accent"])
+        self._add_detail(scale=(0.54, 0.12, 0.78), position=(0, 0.78, -0.28), color=self.style["panel"])
+        self._add_detail(scale=(0.18, 0.22, 0.72), position=(-0.96, -0.18, -0.08), color=self.style["metal"])
+        self._add_detail(scale=(0.18, 0.22, 0.72), position=(0.96, -0.18, -0.08), color=self.style["metal"])
+        self._add_vent_bank(position=(0, 0.7, -0.56), count=3, spacing=0.18, size=(0.12, 0.16, 0.16), color=self.style["metal"], cap_color=self.style["roof"])
+        self._add_pipe(position=(-0.94, -0.1, -0.12), length=0.96, radius=0.045, axis="z", color=self.style["metal"])
+        self._add_pipe(position=(0.94, -0.1, -0.12), length=0.96, radius=0.045, axis="z", color=self.style["metal"])
+        self._add_light_beacon(position=(-0.92, 0.28, 0.76), radius=0.06, glow_color=self.style["accent"])
+        self._add_light_beacon(position=(0.92, 0.28, 0.76), radius=0.06, glow_color=self.style["accent"])
+        dish_mount = self._add_detail(scale=(0.16, 0.28, 0.16), position=(0, 1.16, 0.2), color=self.style["accent"])
+        self._add_detail(scale=(0.26, 0.08, 0.26), position=(0, 1.0, 0.2), color=self.style["metal"], model=Cylinder(14, start=-0.5))
+        self._add_pipe(position=(-0.12, 1.0, 0.16), length=0.28, radius=0.03, axis="x", color=self.style["metal"])
+        self._add_pipe(position=(0.12, 1.0, 0.16), length=0.28, radius=0.03, axis="x", color=self.style["metal"])
+        self._add_pipe(position=(0, 1.0, 0.04), length=0.26, radius=0.03, axis="z", color=self.style["metal"])
+        dish = Entity(
+            parent=dish_mount,
+            model="quad",
+            scale=(0.72, 0.72),
+            position=(0, 0.14, -0.08),
+            rotation=(58, 0, 0),
+            color=self.style["glow"],
+            collider=None,
+        )
+        self.visual_parts.append(dish)
+        if self.faction_key == "soviet":
+            self._add_detail(scale=(0.14, 0.82, 0.14), position=(-0.46, 0.98, -0.58), color=self.style["metal"])
+            self._add_detail(scale=(0.14, 0.82, 0.14), position=(0.46, 0.98, -0.58), color=self.style["metal"])
+            self._add_detail(scale=(0.38, 0.08, 0.38), position=(0, 1.44, 0.12), color=self.style["accent"])
+        else:
+            self._add_detail(scale=(0.48, 0.08, 0.16), position=(0, 0.9, -0.82), color=self.style["glow"])
+            self._add_detail(scale=(0.22, 0.18, 0.62), position=(0.82, 0.18, -0.66), color=self.style["panel"])
+            self._add_detail(scale=(0.22, 0.18, 0.62), position=(-0.82, 0.18, -0.66), color=self.style["panel"])
+
+
+class Airfield(Building):
+    display_name = "Air Base"
+    cost = 450
+    base_tint = color.rgb32(101, 114, 128)
+    size = (3.55, 1.7, 3.8)
+    placement_y = 0.85
+    default_health = 1080
+    selection_ring_scale = 1.13
+
+    def _get_style(self):
+        if self.faction_key == "soviet":
+            return {
+                "body": color.rgb32(127, 75, 68),
+                "roof": color.rgb32(168, 95, 86),
+                "metal": color.rgb32(78, 73, 76),
+                "accent": self.faction.accent,
+                "panel": color.rgb32(97, 51, 45),
+                "glow": self.faction.glow,
+            }
+
+        return {
+            "body": color.rgb32(82, 118, 160),
+            "roof": color.rgb32(154, 185, 214),
+            "metal": color.rgb32(74, 90, 113),
+            "accent": self.faction.accent,
+            "panel": color.rgb32(48, 73, 103),
+            "glow": self.faction.glow,
+        }
+
+    def _build_visuals(self):
+        self._add_detail(scale=(1.12, 0.04, 1.12), position=(0, -0.52, 0), color=self.style["metal"])
+        self._add_perimeter_trim(footprint=(1.16, 1.16), y=-0.34, thickness=0.05, edge=0.08, color=self.style["panel"])
+        self._add_perimeter_trim(footprint=(0.96, 0.96), y=0.28, thickness=0.04, edge=0.06, color=self.style["metal"])
+        self._add_corner_posts(
+            footprint=(1.02, 1.04),
+            y=-0.08,
+            height=0.34,
+            thickness=0.08,
+            inset=0.06,
+            color=self.style["panel"],
+            cap_color=self.style["roof"],
+        )
+        self._add_detail(scale=(0.96, 0.18, 0.94), position=(0, -0.08, 0), color=self.style["body"])
+        self._add_detail(scale=(0.92, 0.08, 0.9), position=(0, 0.22, 0), color=self.style["roof"])
+        self._add_detail(scale=(0.98, 0.04, 0.16), position=(0, 0.1, 0.0), color=self.style["glow"])
+        self._add_detail(scale=(0.16, 0.04, 0.98), position=(0, 0.1, 0.0), color=self.style["glow"])
+        self._add_detail(scale=(0.94, 0.04, 0.16), position=(0, 0.12, 1.1), color=self.style["accent"])
+        self._add_detail(scale=(0.94, 0.04, 0.16), position=(0, 0.12, -1.1), color=self.style["accent"])
+        self._add_detail(scale=(0.22, 0.42, 0.22), position=(-1.08, -0.08, -0.5), color=self.style["panel"])
+        self._add_detail(scale=(0.22, 0.42, 0.22), position=(1.08, -0.08, -0.5), color=self.style["panel"])
+        self._add_detail(scale=(0.22, 0.42, 0.22), position=(-1.08, -0.08, 0.5), color=self.style["panel"])
+        self._add_detail(scale=(0.22, 0.42, 0.22), position=(1.08, -0.08, 0.5), color=self.style["panel"])
+        self._add_detail(scale=(0.58, 0.28, 0.34), position=(-0.96, 0.22, -0.94), color=self.style["panel"])
+        self._add_detail(scale=(0.18, 0.62, 0.18), position=(-0.98, 0.72, -0.96), color=self.style["metal"])
+        self._add_detail(scale=(0.34, 0.08, 0.34), position=(-0.98, 1.06, -0.96), color=self.style["glow"])
+        self._add_vent_bank(position=(0.0, 0.36, -0.92), count=5, spacing=0.16, size=(0.08, 0.14, 0.18), color=self.style["metal"], cap_color=self.style["roof"])
+        self._add_pipe(position=(1.08, -0.08, 0.0), length=1.18, radius=0.045, axis="z", color=self.style["metal"])
+        self._add_pipe(position=(-1.08, -0.08, 0.0), length=1.18, radius=0.045, axis="z", color=self.style["metal"])
+        self._add_light_beacon(position=(-1.14, 0.08, -1.1), radius=0.055, glow_color=self.style["glow"])
+        self._add_light_beacon(position=(1.14, 0.08, -1.1), radius=0.055, glow_color=self.style["glow"])
+        self._add_light_beacon(position=(-1.14, 0.08, 1.1), radius=0.055, glow_color=self.style["glow"])
+        self._add_light_beacon(position=(1.14, 0.08, 1.1), radius=0.055, glow_color=self.style["glow"])
+        if self.faction_key == "soviet":
+            self._add_detail(scale=(0.54, 0.08, 0.16), position=(0, 0.26, 0.86), color=self.style["glow"])
+            self._add_detail(scale=(0.24, 0.18, 0.82), position=(1.0, 0.04, -0.18), color=self.style["panel"])
+        else:
+            self._add_stack_tower(position=(-1.02, 0.86, -0.98), height=0.52, radius=0.09, segments=3, color=self.style["metal"], cap_color=self.style["glow"])
+            self._add_detail(scale=(0.58, 0.08, 0.18), position=(0, 0.26, 0.86), color=self.style["glow"])
+            self._add_detail(scale=(0.24, 0.18, 0.88), position=(1.0, 0.04, -0.12), color=self.style["panel"])
+            self._add_detail(scale=(0.22, 0.06, 0.64), position=(-0.22, 0.38, 0.0), color=self.style["accent"])
 
 
 class PowerPlant(Building):
@@ -490,29 +842,112 @@ class PowerPlant(Building):
         }
 
     def _build_visuals(self):
-        self._add_detail(scale=(1.1, 0.04, 1.1), position=(0, -0.52, 0), color=self.style["metal"])
-        self._add_detail(scale=(1.08, 0.08, 1.08), position=(0, 0.56, 0), color=self.style["roof"])
-        self._add_detail(scale=(0.44, 0.62, 0.44), position=(0, 0.16, 0), color=self.style["accent"])
-        self._add_detail(scale=(0.18, 0.42, 0.18), position=(-0.34, -0.1, 0.34), color=self.style["panel"])
-        self._add_detail(scale=(0.18, 0.42, 0.18), position=(0.34, -0.1, 0.34), color=self.style["panel"])
-        self._add_detail(scale=(0.82, 0.08, 0.12), position=(0, 0.12, 0.5), color=self.style["panel"])
-        self._add_detail(scale=(0.56, 0.08, 0.08), position=(0, 0.34, 0.1), color=self.style["glow"])
-        self._add_detail(scale=(0.16, 0.18, 0.64), position=(0, 0.6, 0.02), color=self.style["accent"])
-        self._add_detail(scale=(0.56, 0.06, 0.06), position=(0, -0.02, 0.76), color=self.style["panel"])
+        self._add_detail(scale=(1.12, 0.04, 1.12), position=(0, -0.52, 0), color=self.style["metal"])
+        self._add_perimeter_trim(footprint=(1.16, 1.16), y=-0.34, thickness=0.05, edge=0.08, color=self.style["panel"])
+        self._add_corner_posts(
+            footprint=(1.06, 1.06),
+            y=-0.02,
+            height=0.48,
+            thickness=0.08,
+            inset=0.08,
+            color=self.style["panel"],
+            cap_color=self.style["roof"],
+        )
         if self.faction_key == "soviet":
-            self._add_detail(scale=(0.14, 0.92, 0.14), position=(-0.26, 0.82, -0.24), color=self.style["metal"])
-            self._add_detail(scale=(0.14, 0.92, 0.14), position=(0.26, 0.82, -0.24), color=self.style["metal"])
-            self._add_detail(scale=(0.22, 0.12, 0.22), position=(-0.26, 1.28, -0.24), color=self.style["glow"])
-            self._add_detail(scale=(0.22, 0.12, 0.22), position=(0.26, 1.28, -0.24), color=self.style["glow"])
-            self._add_detail(scale=(0.72, 0.08, 0.08), position=(0, 0.52, -0.46), color=self.style["accent"])
-            self._add_detail(scale=(0.12, 0.24, 0.42), position=(0, 0.22, -0.8), color=self.style["panel"])
+            warning_red = color.rgb32(214, 78, 60)
+            dark_panel = color.rgb32(62, 44, 37)
+            coil_model = Cylinder(18, start=-0.5)
+            stack_model = Cylinder(16, start=-0.5)
+            emitter_model = Cone(18, radius=0.5, height=1)
+
+            self._add_detail(scale=(1.54, 0.42, 1.36), position=(0.0, -0.12, 0.02), color=self.style["body"])
+            self._add_detail(scale=(1.36, 0.12, 1.08), position=(0.0, 0.18, 0.0), color=self.style["roof"])
+            self._add_detail(scale=(0.74, 0.38, 0.54), position=(0.0, 0.08, -0.22), color=self.style["panel"])
+
+            self._add_detail(scale=(0.46, 0.56, 0.28), position=(0.0, -0.04, 0.72), color=dark_panel)
+            self._add_detail(scale=(0.3, 0.54, 0.08), position=(0.0, -0.02, 0.88), color=self.style["accent"])
+            self._add_detail(scale=(0.1, 0.5, 0.1), position=(-0.12, -0.04, 0.86), color=self.style["roof"])
+            self._add_detail(scale=(0.1, 0.5, 0.1), position=(0.12, -0.04, 0.86), color=self.style["roof"])
+            self._add_detail(scale=(0.34, 0.2, 0.12), position=(0.0, 0.14, 0.56), color=self.style["roof"])
+
+            self._add_detail(scale=(0.34, 0.52, 0.46), position=(-0.78, -0.06, 0.34), color=self.style["panel"])
+            self._add_detail(scale=(0.34, 0.52, 0.46), position=(0.78, -0.06, 0.34), color=self.style["panel"])
+            self._add_detail(scale=(0.18, 0.12, 0.18), position=(-0.78, 0.18, 0.72), color=self.style["metal"], model=coil_model)
+            self._add_detail(scale=(0.18, 0.12, 0.18), position=(0.78, 0.18, 0.72), color=self.style["metal"], model=coil_model)
+            self._add_detail(scale=(0.14, 0.14, 0.14), position=(-0.78, 0.3, 0.72), color=warning_red, model="sphere")
+            self._add_detail(scale=(0.14, 0.14, 0.14), position=(0.78, 0.3, 0.72), color=warning_red, model="sphere")
+
+            self._add_detail(scale=(0.3, 0.34, 0.52), position=(-0.86, -0.08, -0.02), color=self.style["panel"])
+            self._add_detail(scale=(0.3, 0.34, 0.52), position=(0.86, -0.08, -0.02), color=self.style["panel"])
+            self._add_detail(scale=(0.14, 0.1, 0.14), position=(-0.58, 0.14, -0.16), color=self.style["metal"], model=coil_model)
+            self._add_detail(scale=(0.14, 0.1, 0.14), position=(0.58, 0.14, -0.16), color=self.style["metal"], model=coil_model)
+            self._add_detail(scale=(0.12, 0.12, 0.12), position=(-0.58, 0.24, -0.16), color=warning_red, model="sphere")
+            self._add_detail(scale=(0.12, 0.12, 0.12), position=(0.58, 0.24, -0.16), color=warning_red, model="sphere")
+
+            self._add_detail(scale=(0.56, 0.12, 0.34), position=(0.0, 0.38, 0.02), color=self.style["roof"])
+            self._add_detail(scale=(0.42, 0.12, 0.26), position=(0.0, 0.5, -0.02), color=self.style["body"])
+            self._add_detail(scale=(0.3, 0.12, 0.18), position=(0.0, 0.62, -0.06), color=self.style["roof"])
+            self._add_detail(scale=(0.14, 0.14, 0.34), position=(0.0, 0.7, -0.06), color=self.style["metal"])
+
+            outer_tower_segments = (
+                ((0.34, 0.18, 0.34), 0.34),
+                ((0.3, 0.16, 0.3), 0.52),
+                ((0.26, 0.16, 0.26), 0.68),
+                ((0.22, 0.18, 0.22), 0.86),
+                ((0.18, 0.24, 0.18), 1.08),
+            )
+            for tower_x in (-0.62, 0.62):
+                self._add_detail(scale=(0.1, 1.28, 0.1), position=(tower_x, 0.92, -0.26), color=self.style["panel"], model=stack_model)
+                for scale, y in outer_tower_segments:
+                    self._add_detail(scale=scale, position=(tower_x, y, -0.26), color=self.style["metal"], model=coil_model)
+                self._add_detail(scale=(0.22, 0.18, 0.22), position=(tower_x, 1.32, -0.26), color=self.style["accent"], model=coil_model)
+                self._add_detail(scale=(0.16, 0.2, 0.16), position=(tower_x, 1.52, -0.26), color=self.style["glow"], model=emitter_model)
+                self._add_detail(scale=(0.34, 0.04, 0.34), position=(tower_x, 1.4, -0.26), color=self.style["glow"], model=coil_model)
+
+            center_tower_segments = (
+                ((0.4, 0.18, 0.4), 0.48),
+                ((0.34, 0.16, 0.34), 0.66),
+                ((0.28, 0.16, 0.28), 0.84),
+                ((0.22, 0.22, 0.22), 1.04),
+            )
+            self._add_detail(scale=(0.12, 1.16, 0.12), position=(0.0, 0.9, -0.14), color=self.style["panel"], model=stack_model)
+            for scale, y in center_tower_segments:
+                self._add_detail(scale=scale, position=(0.0, y, -0.14), color=self.style["metal"], model=coil_model)
+            self._add_detail(scale=(0.3, 0.12, 0.3), position=(0.0, 1.2, -0.14), color=self.style["roof"], model=coil_model)
+            self._add_detail(scale=(0.2, 0.18, 0.2), position=(0.0, 1.38, -0.14), color=self.style["accent"], model=emitter_model)
+
+            self._add_detail(scale=(0.44, 0.05, 0.05), position=(-0.3, 1.52, -0.26), color=self.style["glow"])
+            self._add_detail(scale=(0.44, 0.05, 0.05), position=(0.3, 1.52, -0.26), color=self.style["glow"])
+            self._add_detail(scale=(0.18, 0.05, 0.05), position=(0.0, 1.56, -0.18), color=self.style["glow"])
+
+            self._add_detail(scale=(0.92, 0.08, 0.14), position=(0.0, -0.02, 0.98), color=self.style["panel"])
+            self._add_detail(scale=(1.0, 0.06, 0.08), position=(0.0, 0.08, 1.08), color=self.style["glow"])
+            self._add_vent_bank(position=(0.0, 0.28, -0.54), count=4, spacing=0.16, size=(0.1, 0.16, 0.16), color=self.style["panel"], cap_color=self.style["roof"])
+            self._add_pipe(position=(-0.98, -0.1, -0.08), length=1.1, radius=0.05, axis="z", color=self.style["metal"])
+            self._add_pipe(position=(0.98, -0.1, -0.08), length=1.1, radius=0.05, axis="z", color=self.style["metal"])
+            self._add_pipe(position=(0.0, 0.42, 0.32), length=0.74, radius=0.045, axis="x", color=self.style["metal"])
+            self._add_light_beacon(position=(-0.98, 0.28, 0.86), radius=0.06, glow_color=warning_red)
+            self._add_light_beacon(position=(0.98, 0.28, 0.86), radius=0.06, glow_color=warning_red)
+            return
         else:
-            self._add_detail(scale=(0.14, 0.74, 0.14), position=(-0.26, 0.68, -0.24), color=self.style["metal"])
-            self._add_detail(scale=(0.14, 0.74, 0.14), position=(0.26, 0.68, -0.24), color=self.style["metal"])
-            self._add_detail(scale=(0.2, 0.08, 0.2), position=(-0.26, 1.06, -0.24), color=self.style["glow"])
-            self._add_detail(scale=(0.2, 0.08, 0.2), position=(0.26, 1.06, -0.24), color=self.style["glow"])
-            self._add_detail(scale=(0.78, 0.08, 0.08), position=(0, 0.52, -0.46), color=self.style["accent"])
-            self._add_detail(scale=(0.42, 0.06, 0.12), position=(0, 0.86, 0.42), color=self.style["glow"])
+            self._add_detail(scale=(0.52, 0.54, 0.52), position=(0, 0.04, 0), color=self.style["accent"])
+            self._add_detail(scale=(0.26, 0.48, 0.26), position=(-0.44, -0.02, 0.36), color=self.style["panel"])
+            self._add_detail(scale=(0.26, 0.48, 0.26), position=(0.44, -0.02, 0.36), color=self.style["panel"])
+            self._add_detail(scale=(0.94, 0.08, 0.16), position=(0, 0.08, 0.56), color=self.style["panel"])
+            self._add_detail(scale=(0.62, 0.08, 0.08), position=(0, 0.32, 0.12), color=self.style["glow"])
+            self._add_detail(scale=(0.18, 0.2, 0.84), position=(0, 0.58, 0.02), color=self.style["accent"])
+            self._add_detail(scale=(0.62, 0.06, 0.06), position=(0, -0.06, 0.84), color=self.style["panel"])
+            self._add_detail(scale=(0.14, 0.82, 0.14), position=(-0.28, 0.76, -0.3), color=self.style["metal"])
+            self._add_detail(scale=(0.14, 0.82, 0.14), position=(0.28, 0.76, -0.3), color=self.style["metal"])
+            self._add_detail(scale=(0.22, 0.08, 0.22), position=(-0.28, 1.18, -0.3), color=self.style["glow"])
+            self._add_detail(scale=(0.22, 0.08, 0.22), position=(0.28, 1.18, -0.3), color=self.style["glow"])
+            self._add_detail(scale=(0.86, 0.08, 0.08), position=(0, 0.48, -0.52), color=self.style["accent"])
+            self._add_detail(scale=(0.46, 0.06, 0.12), position=(0, 0.88, 0.44), color=self.style["glow"])
+            self._add_vent_bank(position=(0.0, 0.18, -0.48), count=3, spacing=0.18, size=(0.12, 0.16, 0.18), color=self.style["metal"], cap_color=self.style["roof"])
+            self._add_pipe(position=(-0.78, -0.08, 0.1), length=0.92, radius=0.045, axis="z", color=self.style["metal"])
+            self._add_pipe(position=(0.78, -0.08, 0.1), length=0.92, radius=0.045, axis="z", color=self.style["metal"])
+            self._add_light_beacon(position=(-0.88, 0.24, 0.74), radius=0.055, glow_color=self.style["glow"])
+            self._add_light_beacon(position=(0.88, 0.24, 0.74), radius=0.055, glow_color=self.style["glow"])
 
 
 class TankFactory(Building):
@@ -545,31 +980,50 @@ class TankFactory(Building):
         }
 
     def _build_visuals(self):
-        self._add_detail(scale=(1.12, 0.04, 1.08), position=(0, -0.52, 0), color=self.style["metal"])
-        self._add_detail(scale=(1.08, 0.08, 1.04), position=(0, 0.58, 0), color=self.style["roof"])
-        self._add_detail(scale=(0.86, 0.52, 0.46), position=(0, 0.12, -0.42), color=self.style["body"])
-        self._add_detail(scale=(0.74, 0.18, 0.18), position=(0, 0.02, 0.98), color=self.style["accent"])
-        self._add_detail(scale=(0.86, 0.08, 0.12), position=(0, -0.12, 1.18), color=self.style["glow"])
-        self._add_detail(scale=(0.22, 0.64, 0.22), position=(-0.74, 0.12, 0.28), color=self.style["panel"])
-        self._add_detail(scale=(0.22, 0.64, 0.22), position=(0.74, 0.12, 0.28), color=self.style["panel"])
-        self._add_detail(scale=(0.18, 0.98, 0.18), position=(-0.9, 0.74, -0.7), color=self.style["metal"])
-        self._add_detail(scale=(0.18, 0.98, 0.18), position=(0.9, 0.74, -0.7), color=self.style["metal"])
-        self._add_detail(scale=(0.28, 0.14, 0.28), position=(-0.9, 1.28, -0.7), color=self.style["glow"])
-        self._add_detail(scale=(0.28, 0.14, 0.28), position=(0.9, 1.28, -0.7), color=self.style["glow"])
-        self._add_detail(scale=(0.56, 0.12, 0.18), position=(0, 0.3, 0.58), color=self.style["panel"])
-        self._add_detail(scale=(0.18, 0.34, 1.08), position=(-1.08, -0.26, -0.12), color=self.style["metal"])
-        self._add_detail(scale=(0.18, 0.34, 1.08), position=(1.08, -0.26, -0.12), color=self.style["metal"])
-        self._add_detail(scale=(0.18, 0.18, 0.78), position=(0, 0.44, 0.84), color=self.style["accent"])
-        self._add_detail(scale=(0.16, 0.54, 0.16), position=(-0.42, 0.84, 0.12), color=self.style["metal"])
-        self._add_detail(scale=(0.16, 0.54, 0.16), position=(0.42, 0.84, 0.12), color=self.style["metal"])
+        self._add_detail(scale=(1.14, 0.04, 1.08), position=(0, -0.52, 0), color=self.style["metal"])
+        self._add_perimeter_trim(footprint=(1.18, 1.12), y=-0.34, thickness=0.05, edge=0.08, color=self.style["panel"])
+        self._add_corner_posts(
+            footprint=(1.06, 0.98),
+            y=-0.02,
+            height=0.62,
+            thickness=0.08,
+            inset=0.08,
+            color=self.style["panel"],
+            cap_color=self.style["roof"],
+        )
+        self._add_detail(scale=(0.98, 0.42, 0.56), position=(0, 0.02, -0.48), color=self.style["body"])
+        self._add_detail(scale=(1.0, 0.12, 0.6), position=(0, 0.5, -0.42), color=self.style["roof"])
+        self._add_detail(scale=(0.86, 0.24, 0.22), position=(0, -0.04, 1.02), color=self.style["accent"])
+        self._add_detail(scale=(1.02, 0.08, 0.12), position=(0, -0.16, 1.26), color=self.style["glow"])
+        self._add_detail(scale=(0.24, 0.66, 0.24), position=(-0.82, 0.08, 0.18), color=self.style["panel"])
+        self._add_detail(scale=(0.24, 0.66, 0.24), position=(0.82, 0.08, 0.18), color=self.style["panel"])
+        self._add_detail(scale=(0.18, 1.06, 0.18), position=(-0.98, 0.76, -0.92), color=self.style["metal"])
+        self._add_detail(scale=(0.18, 1.06, 0.18), position=(0.98, 0.76, -0.92), color=self.style["metal"])
+        self._add_detail(scale=(0.3, 0.14, 0.3), position=(-0.98, 1.34, -0.92), color=self.style["glow"])
+        self._add_detail(scale=(0.3, 0.14, 0.3), position=(0.98, 1.34, -0.92), color=self.style["glow"])
+        self._add_detail(scale=(0.64, 0.14, 0.22), position=(0, 0.24, 0.56), color=self.style["panel"])
+        self._add_detail(scale=(0.22, 0.34, 1.18), position=(-1.14, -0.24, -0.08), color=self.style["metal"])
+        self._add_detail(scale=(0.22, 0.34, 1.18), position=(1.14, -0.24, -0.08), color=self.style["metal"])
+        self._add_detail(scale=(0.22, 0.18, 0.92), position=(0, 0.42, 0.88), color=self.style["accent"])
+        self._add_detail(scale=(0.18, 0.58, 0.18), position=(-0.46, 0.88, 0.14), color=self.style["metal"])
+        self._add_detail(scale=(0.18, 0.58, 0.18), position=(0.46, 0.88, 0.14), color=self.style["metal"])
+        self._add_vent_bank(position=(0, 0.78, -0.64), count=5, spacing=0.16, size=(0.08, 0.18, 0.18), color=self.style["metal"], cap_color=self.style["roof"])
+        self._add_pipe(position=(-1.12, -0.08, 0.0), length=1.4, radius=0.05, axis="z", color=self.style["metal"])
+        self._add_pipe(position=(1.12, -0.08, 0.0), length=1.4, radius=0.05, axis="z", color=self.style["metal"])
+        self._add_pipe(position=(0, 0.56, 0.28), length=1.02, radius=0.05, axis="x", color=self.style["metal"])
+        self._add_light_beacon(position=(-1.02, 0.18, 1.0), radius=0.06, glow_color=self.style["accent"])
+        self._add_light_beacon(position=(1.02, 0.18, 1.0), radius=0.06, glow_color=self.style["accent"])
         if self.faction_key == "soviet":
-            self._add_detail(scale=(0.4, 0.14, 0.72), position=(0, 0.9, -0.28), color=self.style["accent"])
-            self._add_detail(scale=(0.12, 0.62, 0.12), position=(0, 1.08, 0.32), color=self.style["metal"])
-            self._add_detail(scale=(0.14, 0.18, 0.72), position=(0.82, 0.06, -0.92), color=self.style["panel"])
+            self._add_stack_tower(position=(-0.96, 0.96, -0.96), height=0.82, radius=0.1, segments=4, color=self.style["metal"], cap_color=self.style["glow"])
+            self._add_stack_tower(position=(0.96, 0.96, -0.96), height=0.82, radius=0.1, segments=4, color=self.style["metal"], cap_color=self.style["glow"])
+            self._add_detail(scale=(0.46, 0.16, 0.84), position=(0, 0.92, -0.18), color=self.style["accent"])
+            self._add_detail(scale=(0.14, 0.68, 0.14), position=(0, 1.12, 0.34), color=self.style["metal"])
+            self._add_detail(scale=(0.18, 0.2, 0.82), position=(0.88, 0.08, -1.02), color=self.style["panel"])
+            self._add_detail(scale=(0.18, 0.2, 0.82), position=(-0.88, 0.08, -1.02), color=self.style["panel"])
         else:
-            self._add_detail(scale=(0.42, 0.1, 0.62), position=(0, 0.92, -0.22), color=self.style["accent"])
-            self._add_detail(scale=(0.1, 0.56, 0.1), position=(0, 1.02, 0.28), color=self.style["metal"])
-            self._add_detail(scale=(0.72, 0.06, 0.1), position=(0, 1.18, -0.78), color=self.style["glow"])
+            self._add_detail(scale=(0.48, 0.12, 0.68), position=(0, 0.94, -0.16), color=self.style["accent"])
+            self._add_detail(scale=(0.12, 0.62, 0.12), position=(0, 1.04, 0.3), color=self.style["metal"])
+            self._add_detail(scale=(0.78, 0.06, 0.12), position=(0, 1.2, -0.94), color=self.style["glow"])
 
 
 class MachineGunBunker(DefenseBuilding):
@@ -607,6 +1061,16 @@ class MachineGunBunker(DefenseBuilding):
 
     def _build_visuals(self):
         self._add_detail(scale=(1.12, 0.04, 1.12), position=(0, -0.5, 0), color=self.style["metal"])
+        self._add_perimeter_trim(footprint=(1.12, 1.12), y=-0.32, thickness=0.05, edge=0.08, color=self.style["panel"])
+        self._add_corner_posts(
+            footprint=(1.0, 1.0),
+            y=-0.04,
+            height=0.36,
+            thickness=0.08,
+            inset=0.08,
+            color=self.style["panel"],
+            cap_color=self.style["roof"],
+        )
         self._add_detail(scale=(1.06, 0.08, 1.06), position=(0, 0.54, 0), color=self.style["roof"])
         self._add_detail(scale=(0.62, 0.22, 0.22), position=(0, 0.1, 0.76), color=self.style["accent"])
         self._add_detail(scale=(0.74, 0.08, 0.12), position=(0, -0.08, 0.98), color=self.style["glow"])
@@ -626,12 +1090,17 @@ class MachineGunBunker(DefenseBuilding):
         self._add_detail(scale=(0.14, 0.18, 0.56), position=(-0.76, -0.14, -0.12), color=self.style["panel"])
         self._add_detail(scale=(0.14, 0.18, 0.56), position=(0.76, -0.14, -0.12), color=self.style["panel"])
         self._add_detail(scale=(0.18, 0.08, 0.18), position=(0, 0.92, -0.46), color=self.style["accent"])
+        self._add_detail(scale=(0.52, 0.05, 0.52), position=(0, 0.34, -0.04), color=self.style["metal"], model=Cylinder(14, start=-0.5))
+        self._add_pipe(position=(-0.78, -0.04, 0.0), length=0.68, radius=0.04, axis="z", color=self.style["metal"])
+        self._add_pipe(position=(0.78, -0.04, 0.0), length=0.68, radius=0.04, axis="z", color=self.style["metal"])
+        self._add_light_beacon(position=(-0.72, 0.04, 0.76), radius=0.055, glow_color=self.style["accent"])
+        self._add_light_beacon(position=(0.72, 0.04, 0.76), radius=0.055, glow_color=self.style["accent"])
 
     def _aim_visuals(self, target):
         direction = Vec3(target.x - self.x, 0, target.z - self.z)
         if direction.length() <= 0.01:
             return
-        target_heading = degrees(atan2(direction.x, direction.z))
+        target_heading = degrees(atan2(direction.x, direction.z)) - self.visual_root.rotation_y
         self.turret.rotation_y = lerp(self.turret.rotation_y, target_heading, min(1, time.dt * 10))
 
     def _attack_flash_parent(self):

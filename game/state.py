@@ -22,5 +22,8 @@ class GameState:
     construction_building_key: Optional[str] = None
     construction_time_left: float = 0.0
     construction_total_time: float = 0.0
+    production_unit_key: Optional[str] = None
+    production_time_left: float = 0.0
+    production_total_time: float = 0.0
     status_message: str = DEFAULT_STATUS
     game_started: bool = False

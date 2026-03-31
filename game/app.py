@@ -1,6 +1,6 @@
 from collections import defaultdict
 from heapq import heappop, heappush
-from math import ceil, sqrt
+from math import ceil, radians, sqrt, tan
 
 from ursina import Entity, Vec2, Vec3, camera, color, destroy, distance, held_keys, mouse, time, window
 from factions import FACTIONS, get_opposing_faction_key
@@ -123,6 +123,7 @@ class RTSGame(Entity):
             self.train_unit,
             self.cancel_build_mode,
             command_title=self.player_faction.command_label,
+            faction_key=self.state.player_faction_key,
         )
         self.main_menu = MainMenuUI(
             self.start_game,
@@ -143,10 +144,12 @@ class RTSGame(Entity):
         self.battle_result = None
         self._apply_faction_ui()
         self._reset_battlefield()
+        self._focus_camera_on_player_base()
         self.state.game_started = True
         self.state.status_message = f"{self.player_faction.name} MCV deployed. Select it and press F to unfold your Main Base."
         self.main_menu.hide()
         self.sidebar.show()
+        self._update_minimap()
         self._refresh_ui()
 
     def set_player_faction(self, faction_key):
@@ -163,9 +166,11 @@ class RTSGame(Entity):
         self._move_camera()
         self._update_selection_drag_visual()
         self._update_construction_queue()
+        self._update_unit_production_queue()
         self._update_build_preview()
         self._cleanup_destroyed_entities()
         self._update_battle_result()
+        self._update_minimap()
 
     def input(self, key):
         if key == "scroll up":
@@ -270,6 +275,14 @@ class RTSGame(Entity):
             self.state.construction_time_left = 0.0
             self.state.construction_total_time = 0.0
             self.state.status_message = f"Construction cancelled: {definition['label']}."
+        elif self.state.production_unit_key is not None:
+            unit_key = self.state.production_unit_key
+            definition = UNIT_DEFINITIONS[unit_key]
+            self.state.credits += definition["cost"]
+            self.state.production_unit_key = None
+            self.state.production_time_left = 0.0
+            self.state.production_total_time = 0.0
+            self.state.status_message = f"Training cancelled: {definition['label']}."
         elif self.state.ready_building_key is None:
             self.state.status_message = DEFAULT_STATUS
         else:
@@ -279,30 +292,34 @@ class RTSGame(Entity):
         self._refresh_ui()
 
     def train_unit(self, unit_key):
-        available_units = self._available_units_for_selection()
-        if unit_key not in available_units:
-            self.state.status_message = "Select a production building to train units."
+        producer_count = self._unit_producer_count(unit_key)
+        if producer_count <= 0:
+            self.state.status_message = self._unit_unavailable_reason(unit_key)
             self._refresh_ui()
             return
 
         definition = UNIT_DEFINITIONS[unit_key]
+        if self.state.production_unit_key:
+            active_definition = UNIT_DEFINITIONS[self.state.production_unit_key]
+            self.state.status_message = f"Production queue busy with {active_definition['label']}."
+            self._refresh_ui()
+            return
+
         if self.state.credits < definition["cost"]:
             self.state.status_message = f"Not enough credits for {definition['label']}."
             self._refresh_ui()
             return
 
-        spawn_position = self._find_spawn_position(
-            self.state.selected_building,
-            unit_radius=getattr(definition["class"], "footprint_radius", 1.2),
-        )
-        unit = self._spawn_unit(
-            unit_key,
-            spawn_position,
-            faction_key=self.state.player_faction_key,
-            owner="player",
-        )
         self.state.credits -= definition["cost"]
-        self.state.status_message = f"{unit.display_name} deployed."
+        self.state.production_unit_key = unit_key
+        self.state.production_total_time = definition.get("build_time", 0.0)
+        self.state.production_time_left = self.state.production_total_time
+        if producer_count > 1:
+            self.state.status_message = (
+                f"Training started: {definition['label']} ({producer_count} production buildings speeding it up)."
+            )
+        else:
+            self.state.status_message = f"Training started: {definition['label']}."
         self._refresh_ui()
 
     def clear_selection(self):
@@ -320,6 +337,20 @@ class RTSGame(Entity):
             for building in self.buildings
             if getattr(building, "owner", None) == owner and not getattr(building, "is_destroyed", False)
         }
+
+    def _faction_key_for_owner(self, owner):
+        if owner == "player":
+            return self.state.player_faction_key
+        if owner == "enemy":
+            return self.state.enemy_faction_key
+        return None
+
+    def _building_available_for_owner(self, building_key, owner="player"):
+        allowed_factions = BUILDING_DEFINITIONS[building_key].get("factions")
+        if not allowed_factions:
+            return True
+        faction_key = self._faction_key_for_owner(owner)
+        return faction_key in allowed_factions
 
     @staticmethod
     def _building_class_for_key(building_key):
@@ -339,6 +370,12 @@ class RTSGame(Entity):
         return tuple(requirement for requirement in definition.get("requires", ()) if requirement not in owned_keys)
 
     def _locked_building_reason(self, building_key, owner="player"):
+        if not self._building_available_for_owner(building_key, owner=owner):
+            faction_key = self._faction_key_for_owner(owner)
+            faction_name = FACTIONS[faction_key].name if faction_key in FACTIONS else owner.title()
+            definition = BUILDING_DEFINITIONS[building_key]
+            return f"{definition['label']} is unavailable to {faction_name}."
+
         missing_requirements = self._missing_build_requirements(building_key, owner=owner)
         if not missing_requirements:
             return ""
@@ -349,12 +386,64 @@ class RTSGame(Entity):
         definition = BUILDING_DEFINITIONS[building_key]
         return f"{definition['label']} requires {', '.join(missing_labels)}."
 
+    @staticmethod
+    def _producer_types_for_unit(unit_key):
+        return tuple(building_type for building_type, unit_keys in BUILDING_TRAINING.items() if unit_key in unit_keys)
+
+    def _production_buildings_for_unit(self, unit_key, owner="player"):
+        producer_types = self._producer_types_for_unit(unit_key)
+        if not producer_types:
+            return ()
+
+        return tuple(
+            building
+            for building in self.buildings
+            if getattr(building, "owner", None) == owner
+            and not getattr(building, "is_destroyed", False)
+            and isinstance(building, producer_types)
+        )
+
+    def _unit_producer_count(self, unit_key, owner="player"):
+        return len(self._production_buildings_for_unit(unit_key, owner=owner))
+
+    def _unit_unavailable_reason(self, unit_key):
+        producer_types = self._producer_types_for_unit(unit_key)
+        if not producer_types:
+            return f"{UNIT_DEFINITIONS[unit_key]['label']} has no production building assigned."
+
+        producer_labels = [producer_type.display_name for producer_type in producer_types]
+        return f"Build {', '.join(producer_labels)} to train {UNIT_DEFINITIONS[unit_key]['label']}."
+
+    def _unit_production_progress(self):
+        if not self.state.production_unit_key or self.state.production_total_time <= 0:
+            return 0.0
+        return 1.0 - (self.state.production_time_left / self.state.production_total_time)
+
+    def _unit_production_seconds_left(self):
+        if not self.state.production_unit_key:
+            return 0.0
+
+        producer_count = self._unit_producer_count(self.state.production_unit_key)
+        if producer_count <= 0:
+            return None
+        return self.state.production_time_left / producer_count
+
+    def _active_production_building_for_unit(self, unit_key, owner="player"):
+        production_buildings = self._production_buildings_for_unit(unit_key, owner=owner)
+        if not production_buildings:
+            return None
+        return min(production_buildings, key=lambda building: (self.spawn_counts[building], building.x, building.z))
+
     def _update_construction_queue(self):
         if not self.state.construction_building_key:
             return
 
+        previous_progress = self._construction_progress()
         self.state.construction_time_left = max(0.0, self.state.construction_time_left - time.dt)
         if self.state.construction_time_left > 0:
+            current_progress = self._construction_progress()
+            if int(previous_progress * 100) != int(current_progress * 100):
+                self._refresh_ui()
             return
 
         self.state.ready_building_key = self.state.construction_building_key
@@ -364,6 +453,46 @@ class RTSGame(Entity):
         self.state.construction_total_time = 0.0
         definition = BUILDING_DEFINITIONS[self.state.ready_building_key]
         self.state.status_message = f"{definition['label']} is ready. Click the ground to place it."
+        self._refresh_ui()
+
+    def _update_unit_production_queue(self):
+        unit_key = self.state.production_unit_key
+        if not unit_key:
+            return
+
+        producer_count = self._unit_producer_count(unit_key)
+        if producer_count <= 0:
+            return
+
+        previous_progress = self._unit_production_progress()
+        self.state.production_time_left = max(0.0, self.state.production_time_left - (time.dt * producer_count))
+        if self.state.production_time_left > 0:
+            current_progress = self._unit_production_progress()
+            if int(previous_progress * 100) != int(current_progress * 100):
+                self._refresh_ui()
+            return
+
+        source_building = self._active_production_building_for_unit(unit_key, owner="player")
+        if source_building is None:
+            self.state.production_time_left = 0.0
+            self._refresh_ui()
+            return
+
+        definition = UNIT_DEFINITIONS[unit_key]
+        spawn_position = self._find_spawn_position(
+            source_building,
+            unit_radius=getattr(definition["class"], "footprint_radius", 1.2),
+        )
+        unit = self._spawn_unit(
+            unit_key,
+            spawn_position,
+            faction_key=self.state.player_faction_key,
+            owner="player",
+        )
+        self.state.production_unit_key = None
+        self.state.production_time_left = 0.0
+        self.state.production_total_time = 0.0
+        self.state.status_message = f"{unit.display_name} deployed."
         self._refresh_ui()
 
     def _construction_label(self):
@@ -376,13 +505,19 @@ class RTSGame(Entity):
         if self.state.construction_building_key:
             label = BUILDING_DEFINITIONS[self.state.construction_building_key]["label"]
             return f"{label} {self.state.construction_time_left:.1f}s"
+        if self.state.production_unit_key:
+            label = UNIT_DEFINITIONS[self.state.production_unit_key]["label"]
+            seconds_left = self._unit_production_seconds_left()
+            if seconds_left is None:
+                return f"{label} paused"
+            return f"{label} {seconds_left:.1f}s"
         return "idle"
 
     def _construction_progress(self):
         if self.state.pending_building_key or self.state.ready_building_key:
             return 1.0
         if not self.state.construction_building_key or self.state.construction_total_time <= 0:
-            return 0.0
+            return self._unit_production_progress()
         return 1.0 - (self.state.construction_time_left / self.state.construction_total_time)
 
     def _building_button_states(self):
@@ -390,43 +525,119 @@ class RTSGame(Entity):
         active_key = self.state.construction_building_key
         ready_key = self.state.ready_building_key
         pending_key = self.state.pending_building_key
+        active_progress = self._construction_progress() if active_key else 0.0
 
         for key, definition in BUILDING_DEFINITIONS.items():
-            base_text = f"{definition['label']} (${definition['cost']})"
+            state = {
+                "title": definition["label"],
+                "meta": f"${definition['cost']}",
+                "enabled": False,
+                "visible": True,
+                "selected": False,
+                "progress": 0.0,
+                "ready": False,
+            }
+            if not self._building_available_for_owner(key, owner="player"):
+                state["visible"] = False
+                states[key] = state
+                continue
+
             if active_key == key:
-                progress = int(self._construction_progress() * 100)
-                states[key] = {
-                    "text": f"{definition['label']} {progress}%",
-                    "enabled": False,
-                    "selected": True,
-                }
+                state.update(
+                    {
+                        "meta": f"BUILD {int(active_progress * 100)}%",
+                        "enabled": False,
+                        "selected": True,
+                        "progress": active_progress,
+                    }
+                )
+                states[key] = state
                 continue
 
             if ready_key == key:
-                states[key] = {
-                    "text": f"{definition['label']} READY",
-                    "enabled": True,
-                    "selected": True,
-                }
+                state.update(
+                    {
+                        "meta": "READY",
+                        "enabled": True,
+                        "selected": True,
+                        "progress": 1.0,
+                        "ready": True,
+                    }
+                )
+                states[key] = state
                 continue
 
             locked_reason = self._locked_building_reason(key)
+            if locked_reason:
+                state["visible"] = False
+                states[key] = state
+                continue
+
             enabled = (
-                not locked_reason
-                and self.state.credits >= definition["cost"]
+                self.state.credits >= definition["cost"]
                 and pending_key is None
                 and active_key is None
                 and ready_key is None
             )
-            states[key] = {
-                "text": base_text,
-                "enabled": enabled,
+            if self.state.credits < definition["cost"]:
+                state["meta"] = "NO CASH"
+            elif pending_key is not None or active_key is not None or ready_key is not None:
+                state["meta"] = "QUEUE"
+            state["enabled"] = enabled
+            states[key] = state
+        return states
+
+    def _unit_button_states(self):
+        states = {}
+        active_key = self.state.production_unit_key
+        active_progress = self._unit_production_progress() if active_key else 0.0
+
+        for key, definition in UNIT_DEFINITIONS.items():
+            if not definition.get("show_in_menu", True):
+                continue
+
+            producer_count = self._unit_producer_count(key)
+            is_active = active_key == key
+            state = {
+                "title": definition["label"],
+                "meta": f"${definition['cost']}",
+                "enabled": False,
+                "visible": producer_count > 0 or is_active,
                 "selected": False,
+                "progress": 0.0,
+                "ready": False,
             }
+            if not state["visible"]:
+                states[key] = state
+                continue
+
+            if is_active:
+                state.update(
+                    {
+                        "meta": "PAUSED" if producer_count <= 0 else f"BUILD {int(active_progress * 100)}%",
+                        "selected": True,
+                        "progress": active_progress,
+                    }
+                )
+                states[key] = state
+                continue
+
+            if active_key is not None:
+                state["meta"] = "QUEUE"
+                states[key] = state
+                continue
+
+            if self.state.credits < definition["cost"]:
+                state["meta"] = "NO CASH"
+            else:
+                state["enabled"] = True
+            states[key] = state
+
         return states
 
     def _apply_faction_ui(self):
         if hasattr(self, "sidebar"):
+            self.sidebar.set_faction_key(self.state.player_faction_key)
             self.sidebar.set_command_title(self.player_faction.command_label)
         if hasattr(self, "main_menu"):
             self.main_menu.set_selected_faction(self.state.player_faction_key)
@@ -610,6 +821,7 @@ class RTSGame(Entity):
         unit.destroy_self()
 
         if not auto and unit.owner == "player":
+            self._center_camera_on_world_point(building.position)
             self.state.selected_building = building
             building.select()
             self.state.status_message = f"{building.display_name} deployed from the MCV."
@@ -855,6 +1067,7 @@ class RTSGame(Entity):
 
         self.preview_entity.enabled = True
         self.preview_entity.scale = building_class.size
+        self.preview_entity.rotation_y = getattr(building_class, "visual_rotation_y", 0)
         self.preview_entity.position = Vec3(
             preview_point.x,
             building_class.placement_y,
@@ -883,20 +1096,6 @@ class RTSGame(Entity):
                 return False, "Too close to another structure."
 
         return True, ""
-
-    def _available_units_for_selection(self):
-        selected_building = self.state.selected_building
-        if not selected_building:
-            return ()
-
-        if selected_building.owner != "player":
-            return ()
-
-        for building_type, unit_keys in BUILDING_TRAINING.items():
-            if isinstance(selected_building, building_type):
-                return unit_keys
-
-        return ()
 
     def _find_spawn_position(self, source_building, unit_radius=1.2):
         base_x = source_building.scale_x / 2 + 1.5
@@ -1230,6 +1429,56 @@ class RTSGame(Entity):
             and building.owner == owner
         )
 
+    def _focus_camera_on_player_base(self):
+        target = self._player_base_anchor()
+        if target is None:
+            return
+        self._center_camera_on_world_point(target.position)
+
+    def _player_base_anchor(self):
+        for building in self.buildings:
+            if (
+                getattr(building, "owner", None) == "player"
+                and not getattr(building, "is_destroyed", False)
+                and getattr(building, "building_key", None) == "main_base"
+            ):
+                return building
+
+        for building in self.buildings:
+            if getattr(building, "owner", None) == "player" and not getattr(building, "is_destroyed", False):
+                return building
+
+        for unit in self.units:
+            if (
+                getattr(unit, "owner", None) == "player"
+                and not getattr(unit, "is_destroyed", False)
+                and getattr(unit, "deploy_building_key", None) == "main_base"
+            ):
+                return unit
+
+        for unit in self.units:
+            if getattr(unit, "owner", None) == "player" and not getattr(unit, "is_destroyed", False):
+                return unit
+
+        return None
+
+    def _center_camera_on_world_point(self, point):
+        lookahead = camera.y / max(0.1, tan(radians(max(1.0, camera.rotation_x))))
+        camera.x = max(-GROUND_EDGE_LIMIT, min(GROUND_EDGE_LIMIT, point.x))
+        camera.z = max(-GROUND_EDGE_LIMIT, min(GROUND_EDGE_LIMIT, point.z - lookahead))
+
+    def _update_minimap(self):
+        if not hasattr(self, "sidebar"):
+            return
+        self.sidebar.update_minimap(
+            ground_limit=GROUND_EDGE_LIMIT,
+            units=self.units,
+            buildings=self.buildings,
+            resource_fields=self.resource_fields,
+            player_color=self.player_faction.selection,
+            enemy_color=self.enemy_faction.selection,
+        )
+
     def _move_camera(self):
         movement = Vec3(
             held_keys["d"] - held_keys["a"],
@@ -1283,8 +1532,12 @@ class RTSGame(Entity):
             selection_label=self._current_selection_label(),
             status_message=self.state.status_message,
             pending_building_key=self.state.pending_building_key,
-            available_units=self._available_units_for_selection(),
-            cancel_available=self.state.pending_building_key is not None or self.state.construction_building_key is not None,
+            unit_states=self._unit_button_states(),
+            cancel_available=(
+                self.state.pending_building_key is not None
+                or self.state.construction_building_key is not None
+                or self.state.production_unit_key is not None
+            ),
             building_states=self._building_button_states(),
             construction_label=self._construction_label(),
             construction_ratio=self._construction_progress(),

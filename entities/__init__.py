@@ -1,3 +1,14 @@
 from .unit import ConstructionVehicle, Dog, Harvester, Soldier, Tank, Unit, Worker
-from .building import Building, DefenseBuilding, MainBase, Refinery, Barracks, PowerPlant, TankFactory, MachineGunBunker
+from .building import (
+    Airfield,
+    Barracks,
+    Building,
+    DefenseBuilding,
+    MachineGunBunker,
+    MainBase,
+    PowerPlant,
+    Radar,
+    Refinery,
+    TankFactory,
+)
 from .resource import ResourceField, GoldField, GemField

@@ -1,6 +1,7 @@
 from ursina import color
 
 from entities import (
+    Airfield,
     Barracks,
     ConstructionVehicle,
     Dog,
@@ -10,6 +11,7 @@ from entities import (
     MachineGunBunker,
     MainBase,
     PowerPlant,
+    Radar,
     Refinery,
     Soldier,
     Tank,
@@ -57,7 +59,6 @@ SIDEBAR_TABS = (
     ("barracks", "Barracks"),
     ("factory", "Factory"),
 )
-
 BUILDING_DEFINITIONS = {
     "power_plant": {
         "label": PowerPlant.display_name,
@@ -66,30 +67,54 @@ BUILDING_DEFINITIONS = {
         "menu_tab": "structures",
         "requires": ("main_base",),
         "build_time": 6.0,
+        "icon_text": "PP",
     },
     "refinery": {
         "label": Refinery.display_name,
         "class": Refinery,
         "cost": Refinery.cost,
         "menu_tab": "structures",
-        "requires": ("main_base",),
+        "requires": ("power_plant",),
         "build_time": 8.0,
+        "icon_text": "RF",
     },
     "barracks": {
         "label": Barracks.display_name,
         "class": Barracks,
         "cost": Barracks.cost,
         "menu_tab": "structures",
-        "requires": ("main_base",),
+        "requires": ("power_plant",),
         "build_time": 7.0,
+        "icon_text": "BR",
+    },
+    "radar": {
+        "label": Radar.display_name,
+        "class": Radar,
+        "cost": Radar.cost,
+        "menu_tab": "structures",
+        "requires": ("barracks",),
+        "build_time": 9.0,
+        "icon_text": "RD",
+        "factions": ("soviet",),
+    },
+    "airfield": {
+        "label": Airfield.display_name,
+        "class": Airfield,
+        "cost": Airfield.cost,
+        "menu_tab": "structures",
+        "requires": ("barracks",),
+        "build_time": 9.0,
+        "icon_text": "AF",
+        "factions": ("alliance",),
     },
     "tank_factory": {
         "label": TankFactory.display_name,
         "class": TankFactory,
         "cost": TankFactory.cost,
         "menu_tab": "structures",
-        "requires": ("refinery", "power_plant"),
+        "requires": ("barracks",),
         "build_time": 11.0,
+        "icon_text": "WF",
     },
     "pillbox": {
         "label": MachineGunBunker.display_name,
@@ -98,6 +123,7 @@ BUILDING_DEFINITIONS = {
         "menu_tab": "defenses",
         "requires": ("barracks",),
         "build_time": 5.0,
+        "icon_text": "MG",
     },
 }
 
@@ -106,32 +132,42 @@ UNIT_DEFINITIONS = {
         "label": ConstructionVehicle.display_name,
         "class": ConstructionVehicle,
         "cost": ConstructionVehicle.cost,
+        "build_time": 14.0,
         "menu_tab": "factory",
         "show_in_menu": False,
+        "icon_text": "MC",
     },
     "soldier": {
         "label": Soldier.display_name,
         "class": Soldier,
         "cost": Soldier.cost,
+        "build_time": 4.0,
         "menu_tab": "barracks",
+        "icon_text": "GI",
     },
     "dog": {
         "label": Dog.display_name,
         "class": Dog,
         "cost": Dog.cost,
+        "build_time": 5.0,
         "menu_tab": "barracks",
+        "icon_text": "K9",
     },
     "harvester": {
         "label": Harvester.display_name,
         "class": Harvester,
         "cost": Harvester.cost,
+        "build_time": 10.0,
         "menu_tab": "factory",
+        "icon_text": "HV",
     },
     "tank": {
         "label": Tank.display_name,
         "class": Tank,
         "cost": Tank.cost,
+        "build_time": 11.0,
         "menu_tab": "factory",
+        "icon_text": "TN",
     },
 }
 
